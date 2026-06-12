@@ -1,0 +1,150 @@
+name: Reusable — Release container image (SemVer)
+
+# Reusable release workflow for Onsetto container artifacts (EKS API + Lambda
+# images). Resolves the SemVer via the shared composite action, builds a Docker
+# image and pushes it to ECR at <repo-name>:<version>, and creates the GitHub
+# release. The ECR repo name is derived from the calling repository.
+#
+# Lambda repos that copy Django code from onsetto-api at build time set
+# copy_onsetto_api: true; the matching onsetto-api ref is resolved by the action.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Exact semantic version (blank for auto)."
+        required: false
+        type: string
+        default: ""
+      version_bump:
+        description: "patch | minor | major | - (main auto-release only)."
+        required: false
+        type: string
+        default: "-"
+      tag_type:
+        description: "candidate | stable."
+        required: true
+        type: string
+      onsetto_api_ref:
+        description: "Optional onsetto-api ref to copy code from."
+        required: false
+        type: string
+        default: ""
+      copy_onsetto_api:
+        description: "true for repos that copy Django code from onsetto-api at build time."
+        required: false
+        type: boolean
+        default: false
+      application_port:
+        description: "APPLICATION_PORT build-arg."
+        required: false
+        type: string
+        default: "8000"
+      dockerfile:
+        description: "Path to the Dockerfile."
+        required: false
+        type: string
+        default: "Dockerfile"
+      upstream_api_repo:
+        description: "owner/name of the upstream API repo."
+        required: false
+        type: string
+        default: "Join-Roy/onsetto-api"
+    secrets:
+      GH_ACCESS_TOKEN:
+        required: true
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-container-semver
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_ACCESS_TOKEN }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Checkout shared CI actions
+        uses: actions/checkout@v4
+        with:
+          repository: Join-Roy/.github
+          ref: main
+          path: .ci-shared
+
+      - name: Resolve release version
+        id: resolve
+        uses: ./.ci-shared/.github/actions/resolve-release-version
+        with:
+          version: ${{ inputs.version }}
+          version_bump: ${{ inputs.version_bump }}
+          tag_type: ${{ inputs.tag_type }}
+          default_branch: ${{ github.event.repository.default_branch }}
+          ref_name: ${{ github.ref_name }}
+          resolve_upstream_api: ${{ inputs.copy_onsetto_api }}
+          onsetto_api_ref: ${{ inputs.onsetto_api_ref }}
+          upstream_api_repo: ${{ inputs.upstream_api_repo }}
+
+      - name: Checkout onsetto-api for copied code
+        if: ${{ inputs.copy_onsetto_api }}
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_ACCESS_TOKEN }}
+          repository: ${{ inputs.upstream_api_repo }}
+          ref: ${{ steps.resolve.outputs.upstream_api_ref }}
+          path: onsetto-api
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@ff717079ee2060e4bcee96c4779b553acc87447c # v4
+        with:
+          aws-region: ${{ vars.ROOT_ACCOUNT_AWS_REGION }}
+          role-to-assume: ${{ vars.ROOT_ACCOUNT_AWS_ROLE_ARN }}
+
+      - name: Log in to AWS ECR
+        shell: bash
+        run: |
+          aws ecr get-login-password --region "${{ vars.ROOT_ACCOUNT_AWS_REGION }}" \
+            | docker login --username AWS --password-stdin "${{ vars.ROOT_ACCOUNT_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.ROOT_ACCOUNT_AWS_REGION }}.amazonaws.com"
+
+      - name: Enable Docker Buildx
+        shell: bash
+        run: |
+          docker buildx create --use --name builder
+          docker buildx inspect --bootstrap
+
+      - name: Build and push image
+        shell: bash
+        env:
+          RELEASE_NUMBER: ${{ steps.resolve.outputs.release_number }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          APPLICATION_PORT: ${{ inputs.application_port }}
+        run: |
+          set -euo pipefail
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          IMAGE_URI="${{ vars.ROOT_ACCOUNT_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.ROOT_ACCOUNT_AWS_REGION }}.amazonaws.com/${REPO_NAME}:${RELEASE_NUMBER}"
+
+          docker buildx build \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            -f "$DOCKERFILE" \
+            --build-arg AWS_ACCOUNT_ID=${{ vars.ROOT_ACCOUNT_AWS_ACCOUNT_ID }} \
+            --build-arg APPLICATION_PORT="$APPLICATION_PORT" \
+            -t "$IMAGE_URI" \
+            --push \
+            .
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.release_number }}
+          name: Release ${{ steps.resolve.outputs.release_number }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: ${{ steps.resolve.outputs.release_class != 'stable' }}
