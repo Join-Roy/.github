@@ -53,6 +53,13 @@ on:
     secrets:
       GH_ACCESS_TOKEN:
         required: true
+    outputs:
+      release_number:
+        description: "Resolved release tag (e.g. v1.4.0-rc.2)."
+        value: ${{ jobs.build-and-release.outputs.release_number }}
+      release_class:
+        description: "stable | release-candidate | hotfix-candidate."
+        value: ${{ jobs.build-and-release.outputs.release_class }}
 
 jobs:
   build-and-release:
@@ -63,6 +70,9 @@ jobs:
     permissions:
       id-token: write
       contents: write
+    outputs:
+      release_number: ${{ steps.resolve.outputs.release_number }}
+      release_class: ${{ steps.resolve.outputs.release_class }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -148,3 +158,19 @@ jobs:
           target_commitish: ${{ github.sha }}
           draft: false
           prerelease: ${{ steps.resolve.outputs.release_class != 'stable' }}
+
+      - name: Release summary
+        shell: bash
+        env:
+          RELEASE_NUMBER: ${{ steps.resolve.outputs.release_number }}
+          RELEASE_CLASS: ${{ steps.resolve.outputs.release_class }}
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          IMAGE_URI="${{ vars.ROOT_ACCOUNT_AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.ROOT_ACCOUNT_AWS_REGION }}.amazonaws.com/${REPO_NAME}:${RELEASE_NUMBER}"
+          {
+            echo "## ✅ Released \`${RELEASE_NUMBER}\` (${RELEASE_CLASS})"
+            echo ""
+            echo "**Deploy with:** \`${RELEASE_NUMBER}\`"
+            echo ""
+            echo "- Image: \`${IMAGE_URI}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
