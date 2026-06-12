@@ -35,8 +35,9 @@ runs:
 
         # ─────────────────────────────────────────────────────────────
         # Canonical deploy-approver allowlist (SINGLE SOURCE OF TRUTH).
-        # CONFIRM this membership before merge — changing who can deploy
-        # to a protected environment is a reviewed change to this file.
+        # Governs protected environments (sandbox + prod) for every repo,
+        # including hotfix-candidate deploys to sandbox. Confirmed 2026-06-12.
+        # Changing who can deploy to a protected env is a reviewed change here.
         # ─────────────────────────────────────────────────────────────
         CANONICAL="nilesh-joinroy jlemanskiii rzwink"
 
