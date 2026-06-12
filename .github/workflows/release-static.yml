@@ -1,0 +1,69 @@
+name: Reusable — Release static app (SemVer, tag-only)
+
+# Reusable release workflow for Onsetto static apps (onsetto-ui, onsetto-switch-hub).
+# For these repos the "release artifact" is just the SemVer tag + GitHub release;
+# the actual static build happens in the deploy workflow from the tagged source.
+# This resolves the version via the shared composite action and cuts the release.
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Exact semantic version (blank for auto)."
+        required: false
+        type: string
+        default: ""
+      version_bump:
+        description: "patch | minor | major | - (main auto-release only)."
+        required: false
+        type: string
+        default: "-"
+      tag_type:
+        description: "candidate | stable."
+        required: true
+        type: string
+    secrets:
+      GH_ACCESS_TOKEN:
+        required: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-static-semver
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_ACCESS_TOKEN }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Checkout shared CI actions
+        uses: actions/checkout@v4
+        with:
+          repository: Join-Roy/.github
+          ref: main
+          path: .ci-shared
+
+      - name: Resolve release version
+        id: resolve
+        uses: ./.ci-shared/.github/actions/resolve-release-version
+        with:
+          version: ${{ inputs.version }}
+          version_bump: ${{ inputs.version_bump }}
+          tag_type: ${{ inputs.tag_type }}
+          default_branch: ${{ github.event.repository.default_branch }}
+          ref_name: ${{ github.ref_name }}
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ steps.resolve.outputs.release_number }}
+          name: Release ${{ steps.resolve.outputs.release_number }}
+          target_commitish: ${{ github.sha }}
+          draft: false
+          prerelease: ${{ steps.resolve.outputs.release_class != 'stable' }}

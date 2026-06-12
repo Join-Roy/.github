@@ -1,0 +1,482 @@
+name: Resolve release version (SemVer)
+description: >
+  Canonical SemVer resolution for Onsetto release workflows. Computes the release
+  number, class (stable / release-candidate / hotfix-candidate) and the source
+  strategy from the triggering ref (main / release/x.y.z / hotfix/x.y.z) plus the
+  workflow_dispatch inputs, enforcing the release-model rules. Optionally resolves
+  the matching onsetto-api ref for repos that copy Django code at build time.
+
+  Requires the repo to be checked out with fetch-depth: 0 and fetch-tags: true.
+
+inputs:
+  version:
+    description: "Exact semantic version (e.g. v1.4.0, v1.4.0-rc.2, v1.4.1-hotfix.2). Blank for auto."
+    required: false
+    default: ""
+  version_bump:
+    description: "patch | minor | major | - (only for main auto-release with no explicit version)."
+    required: false
+    default: "-"
+  tag_type:
+    description: "candidate | stable."
+    required: true
+  default_branch:
+    description: "Repository default branch (e.g. main)."
+    required: true
+  ref_name:
+    description: "Triggering ref name (github.ref_name)."
+    required: true
+  resolve_upstream_api:
+    description: "true to resolve the matching onsetto-api ref (repos that copy Django code)."
+    required: false
+    default: "false"
+  onsetto_api_ref:
+    description: "Optional explicit onsetto-api ref to copy from."
+    required: false
+    default: ""
+  upstream_api_repo:
+    description: "owner/name of the upstream API repo to resolve refs against."
+    required: false
+    default: "Join-Roy/onsetto-api"
+
+outputs:
+  release_number:
+    description: "Resolved release tag (e.g. v1.4.0)."
+    value: ${{ steps.resolve.outputs.release_number }}
+  release_class:
+    description: "stable | release-candidate | hotfix-candidate."
+    value: ${{ steps.resolve.outputs.release_class }}
+  source_strategy:
+    description: "How the version was resolved."
+    value: ${{ steps.resolve.outputs.source_strategy }}
+  upstream_api_ref:
+    description: "Resolved onsetto-api ref (empty when resolve_upstream_api is false)."
+    value: ${{ steps.resolve.outputs.upstream_api_ref }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve semantic version
+      id: resolve
+      shell: bash
+      env:
+        DEFAULT_BRANCH: ${{ inputs.default_branch }}
+        GITHUB_REF_NAME_SAFE: ${{ inputs.ref_name }}
+        INPUT_VERSION: ${{ inputs.version }}
+        VERSION_BUMP: ${{ inputs.version_bump }}
+        TAG_TYPE: ${{ inputs.tag_type }}
+        INPUT_ONSETTO_API_REF: ${{ inputs.onsetto_api_ref }}
+        RESOLVE_UPSTREAM_API: ${{ inputs.resolve_upstream_api }}
+        UPSTREAM_API_REPO: ${{ inputs.upstream_api_repo }}
+      run: |
+        set -euo pipefail
+
+        SEMVER_CORE_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+        SEMVER_RC_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$'
+        SEMVER_HOTFIX_REGEX='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-hotfix\.([1-9][0-9]*)$'
+
+        normalize_version() {
+          local raw="${1#refs/heads/}"
+          raw="${raw#release/}"
+          raw="${raw#hotfix/}"
+          raw="${raw#v}"
+          if [[ ! "$raw" =~ $SEMVER_CORE_REGEX && ! "$raw" =~ $SEMVER_RC_REGEX && ! "$raw" =~ $SEMVER_HOTFIX_REGEX ]]; then
+            echo "ERROR: Version must match x.y.z, x.y.z-rc.N, or x.y.z-hotfix.N without leading zero numeric parts. Received: $1" >&2
+            exit 1
+          fi
+          echo "v${raw}"
+        }
+
+        stable_base_from_branch() {
+          local ref_name="${1#refs/heads/}"
+          ref_name="${ref_name#release/}"
+          ref_name="${ref_name#hotfix/}"
+          ref_name="${ref_name#v}"
+          if [[ ! "$ref_name" =~ $SEMVER_CORE_REGEX ]]; then
+            echo "ERROR: Branch version must match x.y.z. Received: $1" >&2
+            exit 1
+          fi
+          echo "v${ref_name}"
+        }
+
+        validate_branch_version_membership() {
+          local release_number="$1"
+          local branch_base="$2"
+          local branch_kind="$3"
+
+          if [[ "$release_number" == "$branch_base" ]]; then
+            return 0
+          fi
+
+          case "$branch_kind" in
+            release)
+              if [[ "$release_number" =~ ^${branch_base}-rc\.([1-9][0-9]*)$ ]]; then
+                return 0
+              fi
+              echo "ERROR: Manual version $release_number must be $branch_base or ${branch_base}-rc.N." >&2
+              ;;
+            hotfix)
+              if [[ "$release_number" =~ ^${branch_base}-hotfix\.([1-9][0-9]*)$ ]]; then
+                return 0
+              fi
+              echo "ERROR: Manual version $release_number must be $branch_base or ${branch_base}-hotfix.N." >&2
+              ;;
+            *)
+              echo "ERROR: Unsupported branch kind $branch_kind for version validation." >&2
+              ;;
+          esac
+          exit 1
+        }
+
+        latest_stable_tag() {
+          (
+            git tag --list 'v*' \
+              | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+              | sort -V \
+              | tail -n 1
+          ) || true
+        }
+
+        version_gt() {
+          local left="${1#v}"
+          local right="${2#v}"
+          if [[ "$left" == "$right" ]]; then
+            return 1
+          fi
+          [[ "$(printf '%s\n%s\n' "$left" "$right" | sort -V | tail -n 1)" == "$left" ]]
+        }
+
+        next_version_from_main() {
+          local latest major minor patch bump
+          latest="$(latest_stable_tag)"
+          bump="$VERSION_BUMP"
+
+          if [[ "$bump" == "-" ]]; then
+            echo "ERROR: Select version_bump=patch, minor, or major when releasing from main without an explicit version." >&2
+            exit 1
+          fi
+
+          if [[ -z "$latest" ]]; then
+            case "$bump" in
+              major|minor|patch) echo "v1.0.0" ;;
+              *) echo "ERROR: Unsupported bump type: $bump" >&2; exit 1 ;;
+            esac
+            return
+          fi
+
+          latest="${latest#v}"
+          IFS='.' read -r major minor patch <<< "$latest"
+
+          case "$bump" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+            *) echo "ERROR: Unsupported bump type: $bump" >&2; exit 1 ;;
+          esac
+
+          echo "v${major}.${minor}.${patch}"
+        }
+
+        next_candidate_tag() {
+          local base="$1"
+          local suffix_label="$2"
+          local latest suffix next_num
+          latest="$(git tag --list "${base}-${suffix_label}.*" --sort=-version:refname | head -n 1)"
+          if [[ -z "$latest" ]]; then
+            echo "${base}-${suffix_label}.1"
+            return
+          fi
+          suffix="${latest##*.}"
+          next_num=$((suffix + 1))
+          echo "${base}-${suffix_label}.${next_num}"
+        }
+
+        mainline_commit_merged_into_head() {
+          # True when $ref carries first-parent mainline history newer than
+          # $previous_commit that has been pulled INTO HEAD. Back-merges of this
+          # branch into $ref live on a merge commit's second parent and are
+          # ignored, so a hotfix release can be re-run after merge-back.
+          local ref="$1"
+          local previous_commit="$2"
+          local oldest_mainline_commit
+          oldest_mainline_commit="$(git rev-list --first-parent --reverse "$ref" "^${previous_commit}" | head -n 1)"
+          [[ -n "$oldest_mainline_commit" ]] || return 1
+          git merge-base --is-ancestor "$oldest_mainline_commit" HEAD
+        }
+
+        active_release_branches_exist() {
+          local remote_heads
+          remote_heads="$(git ls-remote --heads origin 'release/*')" || {
+            echo "ERROR: Unable to verify remote release branches before releasing from main." >&2
+            exit 1
+          }
+          [[ -n "$remote_heads" ]]
+        }
+
+        upstream_api_branch_exists() {
+          local ref_name="$1"
+          git ls-remote --exit-code --heads "https://github.com/${UPSTREAM_API_REPO}" "$ref_name" >/dev/null 2>&1
+        }
+
+        upstream_api_ref_exists() {
+          local ref_name="$1"
+          git ls-remote --exit-code "https://github.com/${UPSTREAM_API_REPO}" "refs/heads/$ref_name" "refs/tags/$ref_name" >/dev/null 2>&1
+        }
+
+        enforce_release_branch_rules() {
+          local base="$1"
+          local latest default_branch_ref default_latest_stable existing_candidates
+          local branch_point_commit default_stable_commit default_head_commit
+          local base_major base_minor base_patch latest_major latest_minor latest_patch
+          latest="$(latest_stable_tag)"
+
+          if git show-ref --verify --quiet "refs/tags/$base"; then
+            echo "ERROR: Stable tag $base already exists." >&2
+            exit 1
+          fi
+
+          if [[ -n "$latest" ]] && ! version_gt "$base" "$latest"; then
+            echo "ERROR: Release branch version $base must be greater than latest stable tag $latest." >&2
+            exit 1
+          fi
+
+          if [[ -n "$latest" ]]; then
+            IFS='.' read -r base_major base_minor base_patch <<< "${base#v}"
+            IFS='.' read -r latest_major latest_minor latest_patch <<< "${latest#v}"
+
+            if [[ "$base_major" == "$latest_major" && "$base_minor" == "$latest_minor" ]]; then
+              echo "ERROR: Release branch $base cannot continue the current stable patch line $latest. Use hotfix/$base for patch releases on the live version." >&2
+              exit 1
+            fi
+          fi
+
+          git fetch --no-tags origin "$DEFAULT_BRANCH":"refs/remotes/origin/$DEFAULT_BRANCH"
+          default_branch_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+          branch_point_commit="$(git merge-base "$default_branch_ref" HEAD)"
+          default_head_commit="$(git rev-parse "$default_branch_ref")"
+          default_latest_stable="$(git tag --merged "$default_branch_ref" --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+          existing_candidates="$(git tag --list "${base}-rc.*" | head -n 1 || true)"
+
+          if [[ -n "$default_latest_stable" ]]; then
+            default_stable_commit="$(git rev-list -n 1 "refs/tags/$default_latest_stable")"
+            if [[ "$branch_point_commit" != "$default_stable_commit" ]] \
+              && ! git merge-base --is-ancestor "$default_stable_commit" "$branch_point_commit"; then
+              echo "ERROR: Release branch must fork from $DEFAULT_BRANCH at or after stable baseline $default_latest_stable." >&2
+              exit 1
+            fi
+          elif [[ -z "$existing_candidates" ]] && [[ "$(git rev-parse HEAD)" != "$default_head_commit" ]]; then
+            echo "ERROR: First release tag on $base must start from the current $DEFAULT_BRANCH HEAD when no stable baseline exists yet." >&2
+            exit 1
+          fi
+        }
+
+        enforce_hotfix_branch_rules() {
+          local base="$1"
+          local version_without_v major minor patch previous_patch previous_tag
+          local previous_tag_commit default_branch_ref
+          local release_ref
+
+          if git show-ref --verify --quiet "refs/tags/$base"; then
+            echo "ERROR: Stable hotfix tag $base already exists." >&2
+            exit 1
+          fi
+
+          version_without_v="${base#v}"
+          IFS='.' read -r major minor patch <<< "$version_without_v"
+
+          if (( patch < 1 )); then
+            echo "ERROR: Hotfix version must increment the patch number and cannot end in .0. Received: $base" >&2
+            exit 1
+          fi
+
+          previous_patch=$((patch - 1))
+          previous_tag="v${major}.${minor}.${previous_patch}"
+
+          git show-ref --verify --quiet "refs/tags/$previous_tag" || {
+            echo "ERROR: Hotfix branch requires previous stable tag $previous_tag." >&2
+            exit 1
+          }
+
+          previous_tag_commit="$(git rev-list -n 1 "refs/tags/$previous_tag")"
+
+          git merge-base --is-ancestor "$previous_tag" HEAD || {
+            echo "ERROR: Hotfix branch must descend from $previous_tag." >&2
+            exit 1
+          }
+
+          git fetch --no-tags origin "$DEFAULT_BRANCH":"refs/remotes/origin/$DEFAULT_BRANCH"
+          default_branch_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+
+          if mainline_commit_merged_into_head "$default_branch_ref" "$previous_tag_commit"; then
+            echo "ERROR: Hotfix branch must not include newer $DEFAULT_BRANCH history beyond $previous_tag." >&2
+            exit 1
+          fi
+
+          if git ls-remote --heads origin 'release/*' >/dev/null 2>&1; then
+            git fetch --no-tags origin '+refs/heads/release/*:refs/remotes/origin/release/*'
+            while IFS= read -r release_ref; do
+              [[ -n "$release_ref" ]] || continue
+
+              if mainline_commit_merged_into_head "$release_ref" "$previous_tag_commit"; then
+                echo "ERROR: Hotfix branch must not include release-branch commits beyond $previous_tag (matched $release_ref)." >&2
+                exit 1
+              fi
+            done < <(git for-each-ref --format='%(refname)' 'refs/remotes/origin/release/*')
+          elif git show-ref --verify --quiet "refs/remotes/origin/$DEFAULT_BRANCH"; then
+            echo "ERROR: Unable to verify remote release branches for hotfix validation." >&2
+            exit 1
+          fi
+        }
+
+        classify_release() {
+          local tag="$1"
+          case "$tag" in
+            *-rc.*) echo "release-candidate" ;;
+            *-hotfix.*) echo "hotfix-candidate" ;;
+            *) echo "stable" ;;
+          esac
+        }
+
+        resolve_upstream_api_ref() {
+          # Mirrors the release ref onto the upstream API repo. Echoes the ref or
+          # exits non-zero on an invalid explicit input.
+          local ref_name="$1"
+          if [[ -n "$INPUT_ONSETTO_API_REF" ]]; then
+            if upstream_api_ref_exists "$INPUT_ONSETTO_API_REF"; then
+              echo "$INPUT_ONSETTO_API_REF"; return 0
+            elif [[ "$INPUT_ONSETTO_API_REF" == release/* || "$INPUT_ONSETTO_API_REF" == hotfix/* ]]; then
+              local base; base="$(stable_base_from_branch "$INPUT_ONSETTO_API_REF")"
+              if upstream_api_ref_exists "$base"; then echo "$base"; return 0; fi
+              echo "ERROR: Provided onsetto_api_ref '$INPUT_ONSETTO_API_REF' does not exist in ${UPSTREAM_API_REPO}, and fallback tag '$base' was not found." >&2
+              exit 1
+            fi
+            echo "ERROR: Provided onsetto_api_ref '$INPUT_ONSETTO_API_REF' does not exist in ${UPSTREAM_API_REPO}." >&2
+            exit 1
+          elif [[ "$ref_name" == "main" ]]; then
+            echo "main"
+          elif [[ "$ref_name" == release/* || "$ref_name" == hotfix/* ]]; then
+            local base; base="$(stable_base_from_branch "$ref_name")"
+            if upstream_api_branch_exists "$ref_name"; then echo "$ref_name"; else echo "$base"; fi
+          else
+            echo ""
+          fi
+        }
+
+        REF_NAME="${GITHUB_REF_NAME_SAFE}"
+
+        if [[ "$REF_NAME" == "main" && "$TAG_TYPE" != "stable" ]]; then
+          echo "ERROR: Releases from main must use tag_type=stable because main only produces stable tags." >&2
+          exit 1
+        fi
+
+        if [[ "$REF_NAME" == "main" ]] && active_release_branches_exist; then
+          echo "ERROR: Direct releases from main are blocked while a release/* branch exists. Finish or delete the active release branch first." >&2
+          exit 1
+        fi
+
+        UPSTREAM_API_REF=""
+        if [[ "$RESOLVE_UPSTREAM_API" == "true" ]]; then
+          UPSTREAM_API_REF="$(resolve_upstream_api_ref "$REF_NAME")"
+        fi
+
+        if [[ -n "$INPUT_VERSION" ]]; then
+          if [[ "$REF_NAME" != "main" && "$REF_NAME" != release/* && "$REF_NAME" != hotfix/* ]]; then
+            echo "ERROR: Manual version input is only supported on main, release/x.y.z, or hotfix/x.y.z branches." >&2
+            exit 1
+          fi
+
+          RELEASE_NUMBER="$(normalize_version "$INPUT_VERSION")"
+          SOURCE_STRATEGY="manual-input"
+
+          if [[ ! "${RELEASE_NUMBER#v}" =~ $SEMVER_CORE_REGEX && ! "${RELEASE_NUMBER#v}" =~ $SEMVER_RC_REGEX && ! "${RELEASE_NUMBER#v}" =~ $SEMVER_HOTFIX_REGEX ]]; then
+            echo "ERROR: Manual version must be valid SemVer." >&2
+            exit 1
+          fi
+
+          if [[ "$REF_NAME" == release/* ]]; then
+            BRANCH_BASE="$(stable_base_from_branch "$REF_NAME")"
+            enforce_release_branch_rules "$BRANCH_BASE"
+            validate_branch_version_membership "$RELEASE_NUMBER" "$BRANCH_BASE" "release"
+          elif [[ "$REF_NAME" == hotfix/* ]]; then
+            BRANCH_BASE="$(stable_base_from_branch "$REF_NAME")"
+            enforce_hotfix_branch_rules "$BRANCH_BASE"
+            validate_branch_version_membership "$RELEASE_NUMBER" "$BRANCH_BASE" "hotfix"
+          elif [[ "$REF_NAME" == "main" ]]; then
+            LATEST_STABLE="$(latest_stable_tag)"
+            if [[ "$RELEASE_NUMBER" == *-* ]]; then
+              echo "ERROR: Manual versions from main must be stable tags only." >&2
+              exit 1
+            fi
+            if [[ -n "$LATEST_STABLE" ]] && ! version_gt "$RELEASE_NUMBER" "$LATEST_STABLE"; then
+              echo "ERROR: Manual version $RELEASE_NUMBER must be greater than latest stable tag $LATEST_STABLE." >&2
+              exit 1
+            fi
+          fi
+        elif [[ "$REF_NAME" == release/* ]]; then
+          BRANCH_BASE="$(stable_base_from_branch "$REF_NAME")"
+          enforce_release_branch_rules "$BRANCH_BASE"
+          if [[ "$TAG_TYPE" == "stable" ]]; then
+            RELEASE_NUMBER="$BRANCH_BASE"
+            SOURCE_STRATEGY="release-branch-final"
+          else
+            RELEASE_NUMBER="$(next_candidate_tag "$BRANCH_BASE" "rc")"
+            SOURCE_STRATEGY="release-branch-candidate"
+          fi
+        elif [[ "$REF_NAME" == hotfix/* ]]; then
+          BRANCH_BASE="$(stable_base_from_branch "$REF_NAME")"
+          enforce_hotfix_branch_rules "$BRANCH_BASE"
+          if [[ "$TAG_TYPE" == "stable" ]]; then
+            RELEASE_NUMBER="$BRANCH_BASE"
+            SOURCE_STRATEGY="hotfix-branch-final"
+          else
+            RELEASE_NUMBER="$(next_candidate_tag "$BRANCH_BASE" "hotfix")"
+            SOURCE_STRATEGY="hotfix-branch-candidate"
+          fi
+        elif [[ "$REF_NAME" == "main" ]]; then
+          RELEASE_NUMBER="$(next_version_from_main)"
+          SOURCE_STRATEGY="main-auto-bump"
+        else
+          echo "ERROR: Unsupported ref '$REF_NAME'." >&2
+          echo "Use main, release/x.y.z, hotfix/x.y.z, or provide an explicit version input." >&2
+          exit 1
+        fi
+
+        if git show-ref --verify --quiet "refs/tags/$RELEASE_NUMBER"; then
+          echo "ERROR: Git tag $RELEASE_NUMBER already exists." >&2
+          exit 1
+        fi
+
+        RELEASE_CLASS="$(classify_release "$RELEASE_NUMBER")"
+
+        if [[ "$REF_NAME" == "main" && "$RELEASE_CLASS" != "stable" ]]; then
+          echo "ERROR: Releases from main cannot create prerelease tags." >&2
+          exit 1
+        fi
+
+        if [[ "$REF_NAME" == release/* || "$REF_NAME" == hotfix/* ]]; then
+          if [[ "$TAG_TYPE" == "stable" && "$RELEASE_CLASS" != "stable" ]]; then
+            echo "ERROR: tag_type=stable must resolve to a stable tag." >&2
+            exit 1
+          fi
+          if [[ "$TAG_TYPE" == "candidate" && "$RELEASE_CLASS" == "stable" ]]; then
+            echo "ERROR: tag_type=candidate must resolve to a candidate tag." >&2
+            exit 1
+          fi
+        fi
+
+        if [[ "$RESOLVE_UPSTREAM_API" == "true" && -z "$UPSTREAM_API_REF" ]]; then
+          echo "ERROR: Unable to resolve upstream API source ref for ref $REF_NAME." >&2
+          exit 1
+        fi
+
+        echo "Resolved release number: $RELEASE_NUMBER"
+        echo "Resolved by: $SOURCE_STRATEGY"
+        echo "Release class: $RELEASE_CLASS"
+        echo "Upstream API ref: ${UPSTREAM_API_REF:-<none>}"
+
+        {
+          echo "release_number=$RELEASE_NUMBER"
+          echo "release_class=$RELEASE_CLASS"
+          echo "source_strategy=$SOURCE_STRATEGY"
+          echo "upstream_api_ref=$UPSTREAM_API_REF"
+        } >> "$GITHUB_OUTPUT"
