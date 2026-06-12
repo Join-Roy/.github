@@ -85,7 +85,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Join-Roy/.github
-          ref: main
+          ref: v1
           path: .ci-shared
 
       - name: Resolve release version
