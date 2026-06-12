@@ -1,0 +1,57 @@
+name: Require deploy approver
+description: >
+  Single source of truth for who may deploy to protected environments across all
+  Onsetto repos. Fails the job when a deploy to a protected environment
+  (default: prod + sandbox) is triggered by an actor not on the canonical
+  allowlist; a no-op for unprotected environments (dev, qa).
+
+inputs:
+  environment:
+    description: "Target environment (dev | qa | sandbox | prod)."
+    required: true
+  actor:
+    description: "Triggering actor — pass ${{ github.actor }}."
+    required: true
+  allowed_users:
+    description: "Override the canonical allowlist (space-separated logins). Leave blank to use the canonical set."
+    required: false
+    default: ""
+  protected_environments:
+    description: "Space-separated environments that require an approver."
+    required: false
+    default: "prod sandbox"
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+        ACTOR: ${{ inputs.actor }}
+        OVERRIDE: ${{ inputs.allowed_users }}
+        PROTECTED: ${{ inputs.protected_environments }}
+      run: |
+        set -euo pipefail
+
+        # ─────────────────────────────────────────────────────────────
+        # Canonical deploy-approver allowlist (SINGLE SOURCE OF TRUTH).
+        # Governs protected environments (sandbox + prod) for every repo,
+        # including hotfix-candidate deploys to sandbox. Confirmed 2026-06-12.
+        # Changing who can deploy to a protected env is a reviewed change here.
+        # ─────────────────────────────────────────────────────────────
+        CANONICAL="nilesh-joinroy jlemanskiii rzwink"
+
+        ALLOWED="${OVERRIDE:-$CANONICAL}"
+
+        if [[ " $PROTECTED " != *" $TARGET_ENV "* ]]; then
+          echo "Environment '$TARGET_ENV' is not protected (protected: $PROTECTED); approval gate skipped."
+          exit 0
+        fi
+
+        if [[ " $ALLOWED " == *" $ACTOR "* ]]; then
+          echo "✅ $ACTOR is authorized to deploy to '$TARGET_ENV'."
+          exit 0
+        fi
+
+        echo "::error::$ACTOR is not authorized to deploy to protected environment '$TARGET_ENV'. Allowed: $ALLOWED"
+        exit 1
