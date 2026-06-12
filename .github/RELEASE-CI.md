@@ -22,6 +22,9 @@ on:
       version: { description: "Exact version (blank for auto)", required: false }
       version_bump: { type: choice, required: true, default: "-", options: ["-", patch, minor, major] }
       tag_type: { type: choice, required: true, default: stable, options: [candidate, stable] }
+permissions:
+  contents: write   # create the tag + GitHub release
+  id-token: write   # OIDC for AWS
 jobs:
   release:
     uses: Join-Roy/.github/.github/workflows/release-container.yml@main
@@ -45,6 +48,8 @@ input and set `copy_onsetto_api: true`:
 
 **Static (onsetto-ui, onsetto-switch-hub):**
 ```yaml
+permissions:
+  contents: write   # create the tag + GitHub release
 jobs:
   release:
     uses: Join-Roy/.github/.github/workflows/release-static.yml@main
@@ -77,6 +82,10 @@ jobs:
 - **Buildx** standardized to inline `docker buildx create`.
 
 ## Dependencies / setup
+
+- **Caller permissions (required):** the caller workflow must declare `permissions:`
+  (`contents: write`, plus `id-token: write` for container builds). A reusable
+  workflow's permissions are capped by the caller, and the org default is read-only.
 
 - **Org Actions setting:** allow private repos to use workflows from `Join-Roy/.github`
   (Org → Settings → Actions → "Accessible from repositories owned by the organization").
