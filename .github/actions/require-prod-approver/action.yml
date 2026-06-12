@@ -1,0 +1,50 @@
+name: Require prod deploy approver
+description: >
+  Single source of truth for who may deploy to production across all Onsetto
+  repos. Fails the job when a prod deploy is triggered by an actor not on the
+  canonical allowlist; a no-op for non-prod environments.
+
+inputs:
+  environment:
+    description: "Target environment (dev | qa | sandbox | prod)."
+    required: true
+  actor:
+    description: "Triggering actor — pass ${{ github.actor }}."
+    required: true
+  allowed_users:
+    description: "Override the canonical allowlist (space-separated logins). Leave blank to use the canonical set."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        TARGET_ENV: ${{ inputs.environment }}
+        ACTOR: ${{ inputs.actor }}
+        OVERRIDE: ${{ inputs.allowed_users }}
+      run: |
+        set -euo pipefail
+
+        # ─────────────────────────────────────────────────────────────
+        # Canonical prod-deploy allowlist (SINGLE SOURCE OF TRUTH).
+        # CONFIRM this membership before merge — changing who can deploy
+        # to prod is a reviewed change to this file.
+        # ─────────────────────────────────────────────────────────────
+        CANONICAL="nilesh-joinroy jlemanskiii rzwink"
+
+        ALLOWED="${OVERRIDE:-$CANONICAL}"
+
+        if [ "$TARGET_ENV" != "prod" ]; then
+          echo "Environment '$TARGET_ENV' is not prod; approval gate skipped."
+          exit 0
+        fi
+
+        if [[ " $ALLOWED " == *" $ACTOR "* ]]; then
+          echo "✅ $ACTOR is authorized to deploy to prod."
+          exit 0
+        fi
+
+        echo "::error::$ACTOR is not authorized to deploy to prod. Allowed: $ALLOWED"
+        exit 1

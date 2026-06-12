@@ -1,0 +1,110 @@
+name: Deploy Slack notification
+description: >
+  Post a deploy result to Slack with a per-app avatar. The avatar defaults to a
+  deterministic DiceBear face seeded by the repository name; pass avatar_url to
+  control the face explicitly per app.
+
+inputs:
+  status:
+    description: "Job status: success | failure | cancelled (pass ${{ job.status }})."
+    required: true
+  environment:
+    description: "Target environment."
+    required: true
+  release_number:
+    description: "Released version that was deployed."
+    required: true
+  slack_webhook_url:
+    description: "Slack webhook URL (from a secret). Blank → skip silently."
+    required: true
+  avatar_url:
+    description: "Explicit avatar image URL for this app. Blank → repo-seeded DiceBear face."
+    required: false
+    default: ""
+  details:
+    description: "Optional extra fields as newline-separated 'Label=Value' lines (e.g. Function=..., Bucket=...)."
+    required: false
+    default: ""
+  start_epoch:
+    description: "Optional deploy start time (epoch seconds) to show a duration."
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        STATUS: ${{ inputs.status }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        RELEASE_NUMBER: ${{ inputs.release_number }}
+        SLACK_WEBHOOK_URL: ${{ inputs.slack_webhook_url }}
+        AVATAR_URL: ${{ inputs.avatar_url }}
+        DETAILS: ${{ inputs.details }}
+        START_EPOCH: ${{ inputs.start_epoch }}
+        REPO: ${{ github.repository }}
+        ACTOR: ${{ github.actor }}
+        SHA: ${{ github.sha }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "${SLACK_WEBHOOK_URL:-}" ]; then
+          echo "No Slack webhook configured; skipping notification."
+          exit 0
+        fi
+
+        case "$STATUS" in
+          success)   EMOJI=":white_check_mark:"; WORD="succeeded" ;;
+          cancelled) EMOJI=":warning:";          WORD="cancelled" ;;
+          *)         EMOJI=":x:";                WORD="failed" ;;
+        esac
+
+        SHORT_SHA="$(printf '%s' "$SHA" | cut -c1-7)"
+
+        # Avatar: explicit per-app URL, else deterministic repo-seeded face.
+        if [ -z "${AVATAR_URL:-}" ]; then
+          SEED="$(printf '%s' "$REPO" | tr '/:@ ' '----' | tr -cd '[:alnum:]-_.')"
+          AVATAR_URL="https://api.dicebear.com/7.x/bottts/png?seed=${SEED}&size=160"
+        fi
+
+        TAIL="*Run:*\n${RUN_URL}"
+        if [ -n "${START_EPOCH:-}" ] && printf '%s' "$START_EPOCH" | grep -qE '^[0-9]+$'; then
+          TAIL="Duration: $(( $(date +%s) - START_EPOCH ))s\n${TAIL}"
+        fi
+
+        # Base fields (jq handles escaping).
+        fields="$(jq -n \
+          --arg env "$ENVIRONMENT" --arg rel "$RELEASE_NUMBER" \
+          --arg actor "$ACTOR" --arg sha "$SHORT_SHA" \
+          '[{type:"mrkdwn",text:("*Environment:*\n"+$env)},
+            {type:"mrkdwn",text:("*Release:*\n"+$rel)},
+            {type:"mrkdwn",text:("*Actor:*\n"+$actor)},
+            {type:"mrkdwn",text:("*Commit:*\n`"+$sha+"`")}]')"
+
+        # Optional caller-supplied detail fields.
+        if [ -n "${DETAILS:-}" ]; then
+          while IFS='=' read -r k v; do
+            [ -n "$k" ] || continue
+            fields="$(printf '%s' "$fields" | jq --arg k "$k" --arg v "$v" \
+              '. + [{type:"mrkdwn",text:("*"+$k+":*\n"+$v)}]')"
+          done <<< "$DETAILS"
+        fi
+
+        payload="$(jq -n \
+          --arg summary "${EMOJI} Deploy ${WORD}: *${REPO}*" \
+          --arg avatar "$AVATAR_URL" \
+          --arg alt "Avatar for ${REPO}" \
+          --arg tail "$(printf '%b' "$TAIL")" \
+          --argjson fields "$fields" \
+          '{text:$summary, blocks:[
+             {type:"section",text:{type:"mrkdwn",text:$summary}},
+             {type:"image",image_url:$avatar,alt_text:$alt},
+             {type:"section",fields:$fields},
+             {type:"section",text:{type:"mrkdwn",text:$tail}}
+           ]}')"
+
+        resp="$(curl -sS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" || true)"
+        if [ "$resp" != "ok" ]; then
+          echo "Slack notification response: $resp"
+        fi
