@@ -1,8 +1,9 @@
-name: Require prod deploy approver
+name: Require deploy approver
 description: >
-  Single source of truth for who may deploy to production across all Onsetto
-  repos. Fails the job when a prod deploy is triggered by an actor not on the
-  canonical allowlist; a no-op for non-prod environments.
+  Single source of truth for who may deploy to protected environments across all
+  Onsetto repos. Fails the job when a deploy to a protected environment
+  (default: prod + sandbox) is triggered by an actor not on the canonical
+  allowlist; a no-op for unprotected environments (dev, qa).
 
 inputs:
   environment:
@@ -15,6 +16,10 @@ inputs:
     description: "Override the canonical allowlist (space-separated logins). Leave blank to use the canonical set."
     required: false
     default: ""
+  protected_environments:
+    description: "Space-separated environments that require an approver."
+    required: false
+    default: "prod sandbox"
 
 runs:
   using: composite
@@ -24,27 +29,28 @@ runs:
         TARGET_ENV: ${{ inputs.environment }}
         ACTOR: ${{ inputs.actor }}
         OVERRIDE: ${{ inputs.allowed_users }}
+        PROTECTED: ${{ inputs.protected_environments }}
       run: |
         set -euo pipefail
 
         # ─────────────────────────────────────────────────────────────
-        # Canonical prod-deploy allowlist (SINGLE SOURCE OF TRUTH).
+        # Canonical deploy-approver allowlist (SINGLE SOURCE OF TRUTH).
         # CONFIRM this membership before merge — changing who can deploy
-        # to prod is a reviewed change to this file.
+        # to a protected environment is a reviewed change to this file.
         # ─────────────────────────────────────────────────────────────
         CANONICAL="nilesh-joinroy jlemanskiii rzwink"
 
         ALLOWED="${OVERRIDE:-$CANONICAL}"
 
-        if [ "$TARGET_ENV" != "prod" ]; then
-          echo "Environment '$TARGET_ENV' is not prod; approval gate skipped."
+        if [[ " $PROTECTED " != *" $TARGET_ENV "* ]]; then
+          echo "Environment '$TARGET_ENV' is not protected (protected: $PROTECTED); approval gate skipped."
           exit 0
         fi
 
         if [[ " $ALLOWED " == *" $ACTOR "* ]]; then
-          echo "✅ $ACTOR is authorized to deploy to prod."
+          echo "✅ $ACTOR is authorized to deploy to '$TARGET_ENV'."
           exit 0
         fi
 
-        echo "::error::$ACTOR is not authorized to deploy to prod. Allowed: $ALLOWED"
+        echo "::error::$ACTOR is not authorized to deploy to protected environment '$TARGET_ENV'. Allowed: $ALLOWED"
         exit 1
