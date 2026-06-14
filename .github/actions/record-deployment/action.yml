@@ -1,0 +1,52 @@
+name: Record deployment
+description: >
+  Record the deployed version on the target GitHub Environment as Actions
+  variables (DEPLOYED_VERSION, DEPLOYED_AT, DEPLOYED_RUN_URL) — a definitive,
+  queryable record of what's deployed per environment, instead of inferring it
+  from the deploy commit. Call after a successful deploy. Bookkeeping only:
+  failures warn but never fail the job.
+
+inputs:
+  environment:
+    description: "Target environment (dev | qa | sandbox | prod)."
+    required: true
+  version:
+    description: "Deployed version, e.g. v1.3.2 (the release_number)."
+    required: true
+  github_token:
+    description: "Token with Actions:write to set environment variables (e.g. GH_ACCESS_TOKEN)."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        ENVIRONMENT: ${{ inputs.environment }}
+        VERSION: ${{ inputs.version }}
+        REPO: ${{ github.repository }}
+        RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      run: |
+        set -uo pipefail
+
+        if [ -z "${VERSION:-}" ] || [ -z "${ENVIRONMENT:-}" ]; then
+          echo "::warning::record-deployment: missing version or environment; skipping."
+          exit 0
+        fi
+
+        NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+        set_var() {
+          local name="$1" value="$2"
+          if gh variable set "$name" --env "$ENVIRONMENT" --repo "$REPO" --body "$value"; then
+            echo "  set ${ENVIRONMENT}/${name} = ${value}"
+          else
+            echo "::warning::record-deployment: could not set ${name} on environment ${ENVIRONMENT} (token needs Actions:write). The deploy itself is unaffected."
+          fi
+        }
+
+        echo "Recording deployment: ${REPO} env=${ENVIRONMENT} version=${VERSION}"
+        set_var DEPLOYED_VERSION "$VERSION"
+        set_var DEPLOYED_AT "$NOW"
+        set_var DEPLOYED_RUN_URL "$RUN_URL"
