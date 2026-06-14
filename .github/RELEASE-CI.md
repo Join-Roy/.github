@@ -56,7 +56,7 @@ add an `onsetto_api_ref` input and set `copy_onsetto_api: true`:
       copy_onsetto_api: true
 ```
 
-**Static (onsetto-ui, onsetto-switch-hub):**
+**Static (onsetto-switch-hub):**
 ```yaml
 run-name: "Release · ${{ github.ref_name }} · ${{ inputs.version != '' && inputs.version || (github.ref_name == 'main' && format('stable (bump:{0})', inputs.version_bump) || inputs.tag_type) }} · @${{ github.actor }}"
 permissions:
@@ -79,8 +79,9 @@ jobs:
 | onsetto-document-processor | release-container | false |
 | onsetto-transaction-processor | release-container | true |
 | onsetto-email-notifier | release-container | true |
-| onsetto-ui | release-static | — |
 | onsetto-switch-hub | release-static | — |
+
+> `onsetto-ui` is **deprecated** (replaced by `onsetto-switch-hub`) and is intentionally not listed.
 
 ## What this reconciles (vs. the old per-repo copies)
 
