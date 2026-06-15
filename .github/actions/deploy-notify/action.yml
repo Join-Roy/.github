@@ -6,7 +6,7 @@ description: >
 
 inputs:
   status:
-    description: "Job status: success | failure | cancelled (pass ${{ job.status }})."
+    description: "Job status: success | failure | cancelled (pass job.status from the calling workflow)."
     required: true
   environment:
     description: "Target environment."
