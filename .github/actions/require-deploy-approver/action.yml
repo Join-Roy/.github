@@ -10,7 +10,7 @@ inputs:
     description: "Target environment (dev | qa | sandbox | prod)."
     required: true
   actor:
-    description: "Triggering actor — pass ${{ github.actor }}."
+    description: "Triggering actor — pass github.actor from the calling workflow."
     required: true
   allowed_users:
     description: "Override the canonical allowlist (space-separated logins). Leave blank to use the canonical set."
