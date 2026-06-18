@@ -39,7 +39,7 @@ runs:
         # including hotfix-candidate deploys to sandbox. Confirmed 2026-06-12.
         # Changing who can deploy to a protected env is a reviewed change here.
         # ─────────────────────────────────────────────────────────────
-        CANONICAL="nilesh-joinroy jlemanskiii rzwink"
+        CANONICAL="nilesh-joinroy jlemanskiii rzwink martin-onsetto amd2107on"
 
         ALLOWED="${OVERRIDE:-$CANONICAL}"
 
